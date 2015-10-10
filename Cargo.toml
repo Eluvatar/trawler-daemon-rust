@@ -1,0 +1,24 @@
+[package]
+name = "trawler-daemon"
+version = "0.1.0"
+authors = ["Eluvatar <drstadler@gmail.com>"]
+license = "GPL-3.0+"
+homepage = "https://github.com/Eluvatar/trawler-daemon-rust"
+repository = "https://github.com/Eluvatar/trawler-daemon-rust"
+description = """
+Rust implementation of trawler daemon.
+"""
+
+[[bin]]
+name = "trawler-daemon"
+path = "src/main.rs"
+
+[dependencies.protobuf]
+git = "https://github.com/stepancheg/rust-protobuf.git"
+
+[dependencies.zmq]
+git = "https://github.com/erickt/rust-zmq.git"
+
+[dependencies.curl]
+git = "https://github.com/carllerche/curl-rust.git"
+
