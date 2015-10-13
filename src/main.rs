@@ -39,6 +39,8 @@ use zmq::{SNDMORE};
 extern crate hyper;
 use hyper::Client;
 use hyper::header::{UserAgent,Header,Cookie};
+//use hyper::error::Error as HyperError;
+use hyper::error::Error::Io as HyperIoError;
 
 // time crate.. TODO Cargo.toml
 extern crate time;
@@ -54,6 +56,7 @@ use std::collections::hash_map::Entry;
 
 use std::clone::Clone;
 use std::io::Read;
+use std::io::ErrorKind::{ConnectionAborted,ConnectionReset};
 
 // constants
 const ACK: i32= 200;
@@ -340,46 +343,84 @@ impl Trawler {
     }
     fn fulfill_request(&mut self, request: TRequest) -> Result<(),TrawlerError> {
         let mut reply = trawler::Reply::new();
+        reply.set_reply_type(trawler::Reply_ReplyType::Response);
         reply.set_req_id(request.id);
-        let mut session = self.sessions.get_mut(&request.client).expect("must have session to fulfill request");
-        session.req_count -= 1;
-        let mut url = "".to_string();
-        let rb = match request.method {
-            Method::GET => {
-                url = url + BASE_URL + &request.path + "?" + &request.query;
-                self.http_client.get(&url)
+        let user_agent : Option<UserAgent>;
+        match self.sessions.get_mut(&request.client) {
+            Some(session) => {
+                user_agent = Some(UserAgent(session.user_agent.to_string()));
+                session.req_count -= 1;
             },
-            Method::HEAD => {
-                url = url + BASE_URL + &request.path + "?" + &request.query;
-                self.http_client.head(&url)
-            },
-            Method::POST => {
-                url = url + BASE_URL + &request.path;
-                self.http_client.post(&url).body(&request.query)
-            },
-            _ => panic!("Unsupported method invoked, somehow!?"),
-        };
-        let rb = rb.header(request.session).header(UserAgent(session.user_agent.to_string()));
-        let mut result = try!(rb.send());
-        reply.set_result(result.status.to_u16() as i32);
-        reply.set_continued(true);
-        if request.headers {
-            for hv in result.headers.iter() {
-                reply.set_headers(hv.to_string().into_bytes());
-                try!(Trawler::reply(&mut self.sock, &request.client, &reply));
+            None => panic!("must have session to fulfill request"),
+        }
+        let mut res = Ok(());
+        for i in 0..8 {
+            let mut url = String::new();
+            let rb = match request.method {
+                Method::GET => {
+                    url = url + BASE_URL + &request.path + "?" + &request.query;
+                    self.http_client.get(&url)
+                },
+                Method::HEAD => {
+                    url = url + BASE_URL + &request.path + "?" + &request.query;
+                    self.http_client.head(&url)
+                },
+                Method::POST => {
+                    url = url + BASE_URL + &request.path;
+                    self.http_client.post(&url).body(&request.query)
+                },
+                _ => panic!("Unsupported method invoked, somehow!?"),
+            };
+            let rb = match request.session {
+                Some(ref session) => rb.header(Clone::clone(session)),
+                None => rb,
+            }.header(Clone::clone(&user_agent).unwrap());
+            let result = rb.send();
+            match result {
+                Err(HyperIoError(err)) => {
+                    if err.kind() == ConnectionAborted
+                        || err.kind() == ConnectionReset {
+                        println!("io error: {:?}", err);
+                        res = Err(TrawlerError::from(HyperIoError(err)));
+                        std::thread::sleep_ms(512u32 << i);
+                    } else {
+                        try!(Trawler::fail(&mut self.sock, &request.client, &mut reply));
+                        return Err(TrawlerError::from(err));
+                    }
+                },
+                Err(err) => {
+                    try!(Trawler::fail(&mut self.sock, &request.client, &mut reply));
+                    return Err(TrawlerError::from(err));
+                },
+                Ok(mut response) => {
+                    reply.set_result(response.status.to_u16() as i32);
+                    reply.set_continued(true);
+                    if request.headers {
+                        for hv in response.headers.iter() {
+                            reply.set_headers(hv.to_string().into_bytes());
+                            try!(Trawler::reply(&mut self.sock, &request.client, &reply));
+                        }
+                        reply.clear_headers();
+                    }
+                    let mut buffer = [0u8; 0x4000];
+                    let mut len = try!(response.read(&mut buffer[..]));
+                    while len > 0 {
+                        reply.set_response(buffer[..len].to_vec());
+                        try!(Trawler::reply(&mut self.sock, &request.client, &reply));
+                        len = try!(response.read(&mut buffer[..]));
+                    }
+                    reply.clear_response();
+                    reply.set_continued(false);
+                    return Ok(try!(Trawler::reply(&mut self.sock, &request.client, &reply)));
+                },
             }
-            reply.clear_headers();
         }
-        let mut buffer = [0u8; 0x4000];
-        let mut len = try!(result.read(&mut buffer[..]));
-        while len > 0 {
-            reply.set_response(buffer[..len].to_vec());
-            try!(Trawler::reply(&mut self.sock, &request.client, &reply));
-            len = try!(result.read(&mut buffer[..]));
-        }
-        reply.clear_response();
+        return res;
+    }
+    fn fail(sock: &mut zmq::Socket, client: &[u8], reply: &mut trawler::Reply) -> Result<(), TrawlerError> {
+        reply.set_result(0i32);
         reply.set_continued(false);
-        Ok(try!(Trawler::reply(&mut self.sock, &request.client, &reply)))
+        Trawler::reply(sock, client, reply)
     }
     fn reply(sock: &mut zmq::Socket, client: &[u8], reply: &trawler::Reply) -> Result<(),TrawlerError> {
         let buffer = try!(reply.write_to_bytes());
