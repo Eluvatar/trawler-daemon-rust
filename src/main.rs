@@ -300,6 +300,13 @@ impl Trawler {
         match preq.get_method() {
             Method::GET | Method::HEAD | Method::POST => {
                 self.requests.push_back(TRequest::new(client, preq));
+                match self.sessions.entry(client.to_vec()) {
+                    Entry::Occupied(mut occupied) => {
+                        let session = occupied.get_mut();
+                        session.req_count += 1;
+                    },
+                    Entry::Vacant(_) => unreachable!()
+                }
                 self.ack(client, preq.get_id())
             },
             _ => {
