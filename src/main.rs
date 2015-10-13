@@ -15,6 +15,11 @@
 // You should have received a copy of the GNU General Public License
 // along with Trawler.  If not, see <http://www.gnu.org/licenses/>.
 
+// command line arguments
+extern crate getopts;
+use getopts::Options;
+use std::env;
+
 // protocol 
 // https://github.com/stepancheg/rust-protobuf
 // and https://github.com/Eluvatar/trawler-protocol
@@ -89,6 +94,8 @@ struct TSession {
 }
 
 struct Trawler {
+    #[allow(dead_code)]
+    context: zmq::Context,
     sock: zmq::Socket,
     requests: LinkedList<TRequest>,
     sessions: HashMap<Vec<u8>, TSession>,
@@ -117,26 +124,53 @@ compose_error!{ TrawlerError, {
     hyper::error::Error => HyperError
 }}
 
+fn print_usage(program: &str, opts: Options) {
+        let brief = format!("Usage: {} [options]", program);
+            print!("{}", opts.usage(&brief));
+}
+
 fn main() {
-    let mut trawler: Trawler = Trawler::new();
+    let args: Vec<String> = env::args().collect();
+    let program = args[0].clone();
+
+    let mut opts = Options::new();
+    opts.optopt("p", "port", &format!("set listening port (default={})",PORT), "PORT");
+    opts.optflag("h", "help", "print this help menu");
+    let matches = match opts.parse(&args[1..]) {
+        Ok(m) => { m }
+        Err(f) => {
+            println!("{}",f);
+            print_usage(&program, opts);
+            return;
+        }
+    };
+    if matches.opt_present("h") {
+        print_usage(&program, opts);
+        return;
+    }
+    let mut trawler = match matches.opt_str("p") {
+        None => Trawler::new(),
+        Some(port_string) => Trawler::with_port(port_string.parse::<i32>().unwrap()),
+    };
     trawler.run();
 }
 
 impl Trawler {
     pub fn new() -> Trawler {
+        Trawler::with_port(PORT)
+    }
+    pub fn with_port(port: i32) -> Trawler {
+        let mut context = zmq::Context::new();
+        let mut sock = context.socket(zmq::ROUTER).unwrap();
+        sock.bind(&("tcp://*:".to_string()+&port.to_string())).unwrap();
         Trawler{
-            sock: Trawler::sock(),
+            context: context,
+            sock: sock,
             requests: LinkedList::new(),
             sessions: HashMap::new(),
             http_client: Client::new(),
             interrupted: false,
         }
-    }
-    fn sock() -> zmq::Socket {
-        let mut context = zmq::Context::new();
-        let mut sock = context.socket(zmq::ROUTER).unwrap();
-        sock.bind(&("tcp://*:".to_string()+&PORT.to_string())).unwrap();
-        sock
     }
     fn poll(&mut self, timeout: Duration) -> Result<i32,zmq::Error> {
         let poll_item = self.sock.as_poll_item(zmq::POLLIN);
