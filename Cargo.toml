@@ -13,12 +13,15 @@ Rust implementation of trawler daemon.
 name = "trawler-daemon"
 path = "src/main.rs"
 
+[dependencies]
+time = "0.1"
+
 [dependencies.protobuf]
 git = "https://github.com/stepancheg/rust-protobuf.git"
 
 [dependencies.zmq]
 git = "https://github.com/erickt/rust-zmq.git"
 
-[dependencies.curl]
-git = "https://github.com/carllerche/curl-rust.git"
+[dependencies.hyper]
+git = "https://github.com/hyperium/hyper"
 
