@@ -83,7 +83,7 @@ struct TRequest {
     method: Method,
     path: String,
     query: String,
-    session: Cookie,
+    session: Option<Cookie>,
     headers: bool,
 }
 
@@ -416,8 +416,19 @@ impl TRequest {
             method: preq.get_method(),
             path: preq.get_path().to_string(),    
             query: preq.get_query().to_string(),
-            session: Cookie::parse_header(&[preq.get_session().to_string().into_bytes()][..]).unwrap(),
+            session: if preq.has_session() {
+                Some(TRequest::cookie(preq.get_session()))
+            } else {
+                None
+            },
             headers: preq.has_headers() && preq.get_headers(),
         }
+    }
+    fn cookie(session: &str) -> Cookie {
+        let a = session.to_string();
+        let b = a.into_bytes();
+        Cookie::parse_header(&[b]).unwrap_or_else({ |err|
+            panic!("Error while parsing requested cookies (session field): {:?}", err)
+        })
     }
 }
