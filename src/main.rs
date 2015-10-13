@@ -67,7 +67,9 @@ const LOGOUT__SHUTDOWN: i32 = 503;
 const NACK__GENERIC: i32 = 500;
 const NACK__UNSUPPORTED_METHOD: i32 = 501;
 
-const BASE_URL: &'static str = "http://localhost:6260/";
+const DEBUG_BASE_URL: &'static str = "http://localhost:6260/";
+const HTTP_BASE_URL: &'static str = "http://www.nationstates.net/";
+const HTTPS_BASE_URL: &'static str = "https://www.nationstates.net/";
 
 const PORT: i32 = 5557;
 
@@ -103,6 +105,7 @@ struct Trawler {
     requests: LinkedList<TRequest>,
     sessions: HashMap<Vec<u8>, TSession>,
     http_client: Client,
+    base_url: &'static str,
     interrupted: bool,
 }
 
@@ -142,6 +145,8 @@ fn main() {
 
     let mut opts = Options::new();
     opts.optopt("p", "port", &format!("set listening port (default={})",PORT), "PORT");
+    opts.optflag("d", "debug", "hit mock server instead of nationstates.net");
+    opts.optflag("s", "secure", "hit https://www.nationstates.net (overrides --debug)");
     opts.optflag("h", "help", "print this help menu");
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => { m }
@@ -155,18 +160,26 @@ fn main() {
         print_usage(&program, opts);
         return;
     }
-    let mut trawler = match matches.opt_str("p") {
-        None => Trawler::new(),
-        Some(port_string) => Trawler::with_port(port_string.parse::<i32>().unwrap()),
+    let port = match matches.opt_str("p") {
+        None => None, 
+        Some(port_string) => Some(port_string.parse::<i32>().unwrap()),
     };
+    let base_url = if matches.opt_present("s") {
+        Some(HTTPS_BASE_URL)
+    } else if matches.opt_present("d") {
+        Some(DEBUG_BASE_URL)
+    } else {
+        None
+    };
+    let mut trawler = Trawler::new(port, base_url);
     trawler.run();
 }
 
 impl Trawler {
-    pub fn new() -> Trawler {
-        Trawler::with_port(PORT)
+    pub fn new(port: Option<i32>, base_url: Option<&'static str>) -> Trawler {
+        Trawler::with(port.unwrap_or(PORT), base_url.unwrap_or(HTTP_BASE_URL))
     }
-    pub fn with_port(port: i32) -> Trawler {
+    pub fn with(port: i32, base_url: &'static str) -> Trawler {
         let mut context = zmq::Context::new();
         let mut sock = context.socket(zmq::ROUTER).unwrap();
         sock.bind(&("tcp://*:".to_string()+&port.to_string())).unwrap();
@@ -176,6 +189,7 @@ impl Trawler {
             requests: LinkedList::new(),
             sessions: HashMap::new(),
             http_client: Client::new(),
+            base_url: base_url,
             interrupted: false,
         }
     }
@@ -358,15 +372,15 @@ impl Trawler {
             let mut url = String::new();
             let rb = match request.method {
                 Method::GET => {
-                    url = url + BASE_URL + &request.path + "?" + &request.query;
+                    url = url + &self.base_url + &request.path + "?" + &request.query;
                     self.http_client.get(&url)
                 },
                 Method::HEAD => {
-                    url = url + BASE_URL + &request.path + "?" + &request.query;
+                    url = url + &self.base_url + &request.path + "?" + &request.query;
                     self.http_client.head(&url)
                 },
                 Method::POST => {
-                    url = url + BASE_URL + &request.path;
+                    url = url + &self.base_url + &request.path;
                     self.http_client.post(&url).body(&request.query)
                 },
                 _ => panic!("Unsupported method invoked, somehow!?"),
@@ -382,7 +396,7 @@ impl Trawler {
                         || err.kind() == ConnectionReset {
                         println!("io error: {:?}", err);
                         res = Err(TrawlerError::from(HyperIoError(err)));
-                        std::thread::sleep_ms(512u32 << i);
+                        std::thread::sleep_ms(128u32 << i);
                     } else {
                         try!(Trawler::fail(&mut self.sock, &request.client, &mut reply));
                         return Err(TrawlerError::from(err));
