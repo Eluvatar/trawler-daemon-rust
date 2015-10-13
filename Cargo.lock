@@ -3,6 +3,7 @@ name = "trawler-daemon"
 version = "0.1.0"
 dependencies = [
  "filetime 0.1.6 (registry+https://github.com/rust-lang/crates.io-index)",
+ "getopts 0.2.14 (registry+https://github.com/rust-lang/crates.io-index)",
  "hyper 0.6.14 (git+https://github.com/hyperium/hyper)",
  "protobuf 1.0.4 (git+https://github.com/stepancheg/rust-protobuf.git)",
  "time 0.1.32 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -52,6 +53,11 @@ dependencies = [
  "advapi32-sys 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "winapi 0.2.4 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
+
+[[package]]
+name = "getopts"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "hpack"
