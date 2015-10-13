@@ -8,6 +8,10 @@ repository = "https://github.com/Eluvatar/trawler-daemon-rust"
 description = """
 Rust implementation of trawler daemon.
 """
+build = "build.rs"
+
+[build-dependencies]
+filetime = "0.1.6"
 
 [[bin]]
 name = "trawler-daemon"
