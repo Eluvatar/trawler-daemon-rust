@@ -104,7 +104,9 @@ struct Trawler {
 }
 
 macro_rules! compose_error {
-    ($composed:ident, {$($from:ty => $member:ident),*} ) => {
+    (enum $composed:ident {
+            $( $member:ident($from:ty) ),*
+    }) => {
         #[derive(Debug)]
         enum $composed {
             $( $member($from) ),*
@@ -117,12 +119,14 @@ macro_rules! compose_error {
     }
 }
 
-compose_error!{ TrawlerError, {
-    std::io::Error => IoError,
-    protobuf::ProtobufError => ProtobufError,
-    zmq::Error => ZmqError,
-    hyper::error::Error => HyperError
-}}
+compose_error!{
+    enum TrawlerError {
+        IoError(std::io::Error),
+        ProtobufError(protobuf::ProtobufError),
+        ZmqError(zmq::Error),
+        HyperError(hyper::error::Error)
+    }
+}
 
 fn print_usage(program: &str, opts: Options) {
         let brief = format!("Usage: {} [options]", program);
