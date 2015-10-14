@@ -57,6 +57,7 @@ use std::collections::hash_map::Entry;
 use std::clone::Clone;
 use std::io::Read;
 use std::io::ErrorKind::{ConnectionAborted,ConnectionReset};
+use std::fmt;
 
 // constants
 const ACK: i32= 200;
@@ -92,6 +93,25 @@ struct TRequest {
     headers: bool,
 }
 
+fn client_hex(client: &[u8]) -> String {
+    // TODO uncomment when 1.4.0
+    // client.iter().map(|byte| format!("{:02x}", byte)).collect()
+    client.iter().map(|byte| format!("{:02x}", byte)).fold(String::new(), |a, b| a+&*b)
+}
+
+impl fmt::Debug for TRequest {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("TRequest")
+            .field("client", &client_hex(&self.client))
+            .field("id", &self.id)
+            .field("method", &self.method)
+            .field("path", &self.path)
+            .field("session", &self.session)
+            .field("headers", &self.headers)
+            .finish()
+    }
+}
+
 struct TSession {
     last_activity: f64,
     req_count: u32,
@@ -107,6 +127,7 @@ struct Trawler {
     http_client: Client,
     base_url: &'static str,
     interrupted: bool,
+    verbose: bool,
 }
 
 macro_rules! compose_error {
@@ -147,6 +168,7 @@ fn main() {
     opts.optopt("p", "port", &format!("set listening port (default={})",PORT), "PORT");
     opts.optflag("d", "debug", "hit mock server instead of nationstates.net");
     opts.optflag("s", "secure", "hit https://www.nationstates.net (overrides --debug)");
+    opts.optflag("v", "verbose", "log requests to stdout");
     opts.optflag("h", "help", "print this help menu");
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => { m }
@@ -171,15 +193,22 @@ fn main() {
     } else {
         None
     };
-    let mut trawler = Trawler::new(port, base_url);
+    let verbose = if matches.opt_present("v") {
+        Some(true)
+    } else {
+        None
+    };
+    let mut trawler = Trawler::new(port, base_url, verbose);
     trawler.run();
 }
 
 impl Trawler {
-    pub fn new(port: Option<i32>, base_url: Option<&'static str>) -> Trawler {
-        Trawler::with(port.unwrap_or(PORT), base_url.unwrap_or(HTTP_BASE_URL))
+    pub fn new(port: Option<i32>, base_url: Option<&'static str>, verbose: Option<bool>) -> Trawler {
+        Trawler::with(port.unwrap_or(PORT),
+                      base_url.unwrap_or(HTTP_BASE_URL),
+                      verbose.unwrap_or(false))
     }
-    pub fn with(port: i32, base_url: &'static str) -> Trawler {
+    pub fn with(port: i32, base_url: &'static str, verbose: bool) -> Trawler {
         let mut context = zmq::Context::new();
         let mut sock = context.socket(zmq::ROUTER).unwrap();
         sock.bind(&("tcp://*:".to_string()+&port.to_string())).unwrap();
@@ -191,6 +220,7 @@ impl Trawler {
             http_client: Client::new(),
             base_url: base_url,
             interrupted: false,
+            verbose: verbose
         }
     }
     fn poll(&mut self, timeout: Duration) -> Result<i32,zmq::Error> {
@@ -222,7 +252,8 @@ impl Trawler {
                         // TODO check order
                         timeout = Trawler::api_timeout(then, now);
                         self.receive().unwrap_or_else( |err|
-                            println!("Error while listening and waiting to make request: {:?}", err)
+                            println!("{} Error while listening and waiting to make request: {:?}",
+                                     time::now().rfc3339(), err)
                         );
                         now = get_time();
                     },
@@ -233,7 +264,8 @@ impl Trawler {
                         then = now;
                         timeout = Duration::milliseconds(NS_DELAY_MSEC);
                         self.fulfill_request( active_request ).unwrap_or_else( |err|
-                            println!("Error fulfilling request: {:?}", err)
+                            println!("{} Error fulfilling request: {:?}",
+                                     time::now().rfc3339(), err)
                         );
                     },
                     Ok(_) => {
@@ -261,11 +293,8 @@ impl Trawler {
         for client in &to_remove {
             self.sessions.remove(client);
             Trawler::logout(&mut self.sock, client, LOGOUT__TIMEOUT).unwrap_or_else( |err| {
-                print!("Error while timing out 0x");
-                for byte in client {
-                    print!("{:02x}", byte);
-                }
-                println!(": {:?}", err);
+                print!("{} Error while timing out 0x{}: {:?}",
+                       time::now().rfc3339(), client_hex(client), err);
             });
         }
     }
@@ -291,6 +320,9 @@ impl Trawler {
                 return match Trawler::make_login(content) {
                     Ok(login) => {
                         assert!(login.has_user_agent());
+                        if self.verbose {
+                            println!("{} received {:?}", now().rfc3339(), login);
+                        }
                         vacant.insert(TSession::new(&login));
                         Ok(())
                     },
@@ -299,7 +331,12 @@ impl Trawler {
             }
         }
         match Trawler::make_request(content) {
-            Ok(request) => self.request(client, &request),
+            Ok(request) => {
+                if self.verbose {
+                    println!("{} received {:?}", now().rfc3339(), request);
+                }
+                self.request(client, &request)
+            },
             Err(e) => Err(e),
         }
     }
@@ -394,7 +431,7 @@ impl Trawler {
                 Err(HyperIoError(err)) => {
                     if err.kind() == ConnectionAborted
                         || err.kind() == ConnectionReset {
-                        println!("io error: {:?}", err);
+                        println!("{} io error: {:?}", now().rfc3339(), err);
                         res = Err(TrawlerError::from(HyperIoError(err)));
                         std::thread::sleep_ms(128u32 << i);
                     } else {
@@ -407,6 +444,9 @@ impl Trawler {
                     return Err(TrawlerError::from(err));
                 },
                 Ok(mut response) => {
+                    if self.verbose {
+                        println!("{} {:?} -> {:?}", now().rfc3339(), request, response);
+                    }
                     reply.set_result(response.status.to_u16() as i32);
                     reply.set_continued(true);
                     if request.headers {
