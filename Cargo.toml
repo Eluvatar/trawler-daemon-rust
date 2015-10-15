@@ -20,6 +20,7 @@ path = "src/main.rs"
 [dependencies]
 time = "0.1"
 getopts = "0.2"
+error-type = "0.1.2"
 
 [dependencies.protobuf]
 git = "https://github.com/stepancheg/rust-protobuf.git"

@@ -2,6 +2,7 @@
 name = "trawler-daemon"
 version = "0.1.0"
 dependencies = [
+ "error-type 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "filetime 0.1.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "getopts 0.2.14 (registry+https://github.com/rust-lang/crates.io-index)",
  "hyper 0.6.14 (git+https://github.com/hyperium/hyper)",
@@ -34,6 +35,11 @@ dependencies = [
  "time 0.1.32 (registry+https://github.com/rust-lang/crates.io-index)",
  "url 0.2.37 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
+
+[[package]]
+name = "error-type"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "filetime"

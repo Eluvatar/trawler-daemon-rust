@@ -46,6 +46,9 @@ use hyper::error::Error::Io as HyperIoError;
 extern crate time;
 use time::*;
 
+// error_type crate
+#[macro_use] extern crate error_type;
+
 // simple std structures
 
 use std::collections::LinkedList;
@@ -130,28 +133,13 @@ struct Trawler {
     verbose: bool,
 }
 
-macro_rules! compose_error {
-    (enum $composed:ident {
-            $( $member:ident($from:ty) ),*
-    }) => {
-        #[derive(Debug)]
-        enum $composed {
-            $( $member($from) ),*
-        }
-        $(impl From<$from> for $composed {
-            fn from(err: $from) -> $composed {
-                $composed::$member(err)
-            }
-        })*
-    }
-}
-
-compose_error!{
-    enum TrawlerError {
-        IoError(std::io::Error),
-        ProtobufError(protobuf::ProtobufError),
-        ZmqError(zmq::Error),
-        HyperError(hyper::error::Error)
+error_type! {
+    #[derive(Debug)]
+    pub enum TrawlerError {
+        IoError(std::io::Error) { cause; },
+        ProtobufError(protobuf::ProtobufError) { cause; },
+        ZmqError(zmq::Error) {},
+        HyperError(hyper::error::Error) { cause; }
     }
 }
 
@@ -283,7 +271,6 @@ impl Trawler {
                         panic!("Invalid poll response from zmq!");
                     }
                 }
-
             }
             self.reap();
         }
