@@ -290,9 +290,12 @@ impl Trawler {
         for client in &to_remove {
             self.sessions.remove(client);
             Trawler::logout(&mut self.sock, client, LOGOUT__TIMEOUT).unwrap_or_else( |err| {
-                print!("{} Error while timing out 0x{}: {:?}",
-                       time::now().rfc3339(), client_hex(client), err);
+                println!("{} Error while timing out {}: {:?}",
+                         time::now().rfc3339(), client_hex(client), err);
             });
+            if self.verbose {
+                println!("{} Timed out {}", time::now().rfc3339(), client_hex(client));
+            }
         }
     }
     fn receive(&mut self) -> Result<(),TrawlerError> {
@@ -323,7 +326,11 @@ impl Trawler {
                         vacant.insert(TSession::new(&login));
                         Ok(())
                     },
-                    Err(_) => Trawler::logout(&mut self.sock, client, LOGOUT__LOGIN_SYNTAX),
+                    Err(_) => {
+                        println!("{} Sent logout to {}, as they were not logged in",
+                                 now().rfc3339(), client_hex(client));
+                        Trawler::logout(&mut self.sock, client, LOGOUT__LOGIN_SYNTAX)
+                    },
                 }
             }
         }
