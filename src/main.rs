@@ -199,7 +199,7 @@ impl Trawler {
         Trawler{
             context: context,
             sock: sock,
-            throttle: Throttle::nsapi(),
+            throttle: Throttle::nssite(),
             sessions: HashMap::new(),
             http_client: Client::new(),
             base_url: base_url,
@@ -247,6 +247,7 @@ impl Trawler {
                         );
                     },
                     Ok(0) => {
+                        assert!(! self.throttle.is_empty());
                         self.fulfill_request().unwrap_or_else( |err|
                             println!("{} Error fulfilling request: {:?}",
                                      time::now().rfc3339(), err)

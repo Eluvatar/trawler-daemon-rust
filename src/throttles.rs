@@ -11,6 +11,12 @@ use std::fmt;
 
 use std::cmp::{max};
 
+use std::thread::sleep_ms;
+
+fn sleep(to_sleep: Duration) {
+    sleep_ms(to_sleep.num_milliseconds() as u32)
+}
+
 pub struct TRequest {
     pub client: Vec<u8>,
     pub id: i32,
@@ -25,12 +31,11 @@ pub struct Throttle {
     pattern: Regex,
     window: Duration,
     limit: usize,
-    min_margin: Duration,
     spacing: Duration,
     requests: LinkedList<TRequest>,
     last_start: PreciseTime,
     last_ends: VecDeque<PreciseTime>,
-// TODO    subthrottles: Vec<Throttle>,
+    subthrottles: Vec<Throttle>,
 }
 
 fn time_since(ts: &PreciseTime) -> String {
@@ -48,34 +53,77 @@ impl fmt::Debug for Throttle {
             .field("last_start", &time_since(&self.last_start))
             .field("last_ends", &self.last_ends.iter().map(time_since)
                 .collect::<Vec<String>>())
-// TODO             .field("subthrottles", &self.subthrottles)
+                .field("subthrottles", &self.subthrottles)
             .finish()
     }
 }
 
 impl Throttle {
-    pub fn nsapi() -> Throttle {
+    pub fn nssite() -> Throttle {
         Throttle::new(Regex::new(r"^.*$").unwrap(),
             Duration::seconds(30),
-            50)
+            60,
+            vec![Throttle::nsapi(),Throttle::nsnonapi()])
     }
-    fn new(pattern: Regex, window: Duration, limit: usize ) -> Throttle {
+    fn nsnonapi() -> Throttle {
+        Throttle::new(Regex::new(r"^.*$").unwrap(),
+            Duration::minutes(1),
+            10,
+            vec![])
+    }
+    fn nsapi() -> Throttle {
+        Throttle::new(Regex::new(r"^/?cgi-bin/api\.cgi").unwrap(),
+            Duration::seconds(30),
+            50,
+            vec![])
+    }
+    fn new(pattern: Regex, window: Duration, limit: usize, subthrottles: Vec<Throttle> ) -> Throttle {
         let min_margin = Duration::seconds(1);
         Throttle {
             pattern: pattern,
             window: window,
             limit: limit,
-            min_margin: min_margin,
             spacing: (window + min_margin)/(limit as i32),
             requests: LinkedList::new(),
             last_start: PreciseTime::now(),
             last_ends: VecDeque::with_capacity(limit),
+            subthrottles: subthrottles,
         }
     }
     pub fn span_request<F,T>(&mut self, mut inner: F ) -> T 
         where F: FnMut(TRequest) -> T {
+        if self.requests.is_empty() {
+            if self.subthrottles.is_empty() {
+                panic!("span_request called when no requests available to span!");
+            }
+            loop {
+                let subthrottle_tm = self.subthrottle_timeout();
+                if subthrottle_tm > Duration::zero() {
+                    sleep(subthrottle_tm);
+                }
+                if subthrottle_tm <= Duration::zero() {
+                    break;
+                }
+            }
+        }
         self.last_start = PreciseTime::now();
-        let res = inner(self.requests.pop_front().unwrap());
+        for subthrottle in self.subthrottles.iter_mut() {
+            if subthrottle.timeout() <= Duration::zero()
+            {
+                let res = subthrottle.span_request(inner);
+                let end = PreciseTime::now();
+                if self.last_ends.len() == self.limit {
+                    self.last_ends.pop_back();
+                }
+                self.last_ends.push_front( end );
+                return res;
+            }
+        }
+        let res = if let Some(request) = self.requests.pop_front() {
+            inner(request)
+        } else {
+            panic!("span_request called when no requests available to span!");
+        };
         let end = PreciseTime::now();
         if self.last_ends.len() == self.limit {
             self.last_ends.pop_back();
@@ -84,9 +132,10 @@ impl Throttle {
         res
     }
     pub fn is_empty(&self) -> bool {
-        self.requests.is_empty()
+        self.requests.is_empty() && 
+            self.subthrottles.iter().all(|s| s.is_empty() )
     }
-    pub fn timeout(&self) -> Duration {
+    fn local_timeout(&self) -> Duration {
         let now = PreciseTime::now();
         let spaced = self.spacing - (self.last_start.to(now));
         if let Some(first_end) = self.last_ends.get(self.limit - 1) {
@@ -95,9 +144,35 @@ impl Throttle {
             spaced
         }
     }
-    pub fn queue_request(&mut self, request: TRequest ) {
-        // TODO subthrottles
-        self.requests.push_back(request);
+    fn subthrottle_timeout(&self) -> Duration {
+        self.subthrottles.iter().map(|s| s.timeout()).min().unwrap()
+    }
+    pub fn timeout(&self) -> Duration {
+        let local_tm = self.local_timeout();
+        if self.is_empty() {
+            Duration::max_value()
+        } else if self.subthrottles.len() > 0 {
+            let subthrottle_tm = self.subthrottle_timeout();
+            if self.requests.len() > 0 {
+                max(subthrottle_tm, local_tm)
+            } else {
+                subthrottle_tm
+            }
+        } else {
+            local_tm
+        }
+    }
+    pub fn queue_request(&mut self, request: TRequest ) -> bool {
+        if self.pattern.is_match(&*request.path) {
+            for subthrottle in self.subthrottles.iter_mut() {
+                if subthrottle.pattern.is_match(&*request.path) {
+                    return subthrottle.queue_request(request);
+                }
+            }
+            self.requests.push_back(request);
+            return true;
+        }
+        return false;
     }
 }
 impl TRequest {
