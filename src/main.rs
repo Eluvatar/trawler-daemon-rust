@@ -28,6 +28,11 @@ mod trawler;
 use trawler::Request_Method as Method;
 use protobuf::core::Message;
 
+// rate limits
+extern crate regex;
+mod throttles;
+use throttles::{Throttle,TRequest};
+
 // zmq https://github.com/erickt/rust-zmq
 // used
 // https://github.com/dginev/rust-zmq/blob/aa28c0656aa2e969bbabbcc48ebad7961a325208/examples/zguide/rtdealer/main.rs
@@ -38,7 +43,7 @@ use zmq::{SNDMORE};
 // instead of curl, hyper https://github.com/hyperium/hyper 
 extern crate hyper;
 use hyper::Client;
-use hyper::header::{UserAgent,Header,Cookie};
+use hyper::header::{UserAgent};
 //use hyper::error::Error as HyperError;
 use hyper::error::Error::Io as HyperIoError;
 
@@ -81,20 +86,8 @@ const PORT: i32 = 5557;
 // const MAX_REQUESTS: i32 = 1000;
 const SESSION_TIMEOUT: f64 = 30.0;
 
-const NS_DELAY_MSEC: i64 = 660;
-
 // TODO compose user_agent string using VERSION and client-supplied user_agent component
 //const VERSION: &'static str = env!("CARGO_PKG_VERSION");
-
-struct TRequest {
-    client: Vec<u8>,
-    id: i32,
-    method: Method,
-    path: String,
-    query: String,
-    session: Option<Cookie>,
-    headers: bool,
-}
 
 fn client_hex(client: &[u8]) -> String {
     // TODO uncomment when 1.4.0
@@ -125,7 +118,7 @@ struct Trawler {
     #[allow(dead_code)]
     context: zmq::Context,
     sock: zmq::Socket,
-    requests: LinkedList<TRequest>,
+    throttle: Throttle,
     sessions: HashMap<Vec<u8>, TSession>,
     http_client: Client,
     base_url: &'static str,
@@ -206,7 +199,7 @@ impl Trawler {
         Trawler{
             context: context,
             sock: sock,
-            requests: LinkedList::new(),
+            throttle: Throttle::nsapi(),
             sessions: HashMap::new(),
             http_client: Client::new(),
             base_url: base_url,
@@ -223,45 +216,38 @@ impl Trawler {
         } else {
             0
         };
+        if self.verbose {
+            println!("{} polling with timeout of {} ...",
+                     time::now().rfc3339(), to_sleep);
+        }
         zmq::poll(&mut poll_items, to_sleep)
     }
     fn run(&mut self) {
-        let mut timeout = Duration::milliseconds(NS_DELAY_MSEC);
-        let mut then = get_time();
-        let mut now: Timespec;
-        // TODO confirm events=0 is fine
         // TODO signal handling (not necessarily here)
         loop {
             if self.interrupted {
                 return;
             }
-            if self.requests.is_empty() {
+            if self.throttle.is_empty() {
                 self.receive().unwrap_or_else( |err|
                     println!("Error while waiting for connections: {:?}", err)
                 );
             } else {
+                let timeout = self.throttle.timeout();
                 let poll_res = self.poll(timeout);
-                now = get_time();
                 match poll_res {
                     Err(_) => {
                         self.shutdown();
                         panic!("Polling error from zmq!");
                     },
                     Ok(1) => {
-                        // TODO check order
-                        timeout = Trawler::api_timeout(then, now);
                         self.receive().unwrap_or_else( |err|
                             println!("{} Error while listening and waiting to make request: {:?}",
                                      time::now().rfc3339(), err)
                         );
                     },
                     Ok(0) => {
-                        // TODO check order
-                        let active_request = self.requests.pop_front()
-                            .expect("no items should be removed since check");
-                        then = now;
-                        timeout = Duration::milliseconds(NS_DELAY_MSEC);
-                        self.fulfill_request( active_request ).unwrap_or_else( |err|
+                        self.fulfill_request().unwrap_or_else( |err|
                             println!("{} Error fulfilling request: {:?}",
                                      time::now().rfc3339(), err)
                         );
@@ -271,12 +257,12 @@ impl Trawler {
                         panic!("Invalid poll response from zmq!");
                     }
                 }
+                if self.verbose {
+                    println!("{} throttle: {:?}", time::now().rfc3339(), self.throttle);
+                }
             }
             self.reap();
         }
-    }
-    fn api_timeout(then: Timespec, now: Timespec) -> Duration {
-        Duration::milliseconds(NS_DELAY_MSEC) + (then - now)
     }
     fn reap(&mut self){
         let mut to_remove: LinkedList<Vec<u8>> = LinkedList::new();
@@ -357,7 +343,7 @@ impl Trawler {
     fn request(&mut self, client: &[u8], preq: &trawler::Request) -> Result<(),TrawlerError> {
         match preq.get_method() {
             Method::GET | Method::HEAD | Method::POST => {
-                self.requests.push_back(TRequest::new(client, preq));
+                self.throttle.queue_request(TRequest::new(client, preq));
                 match self.sessions.entry(client.to_vec()) {
                     Entry::Occupied(mut occupied) => {
                         let session = occupied.get_mut();
@@ -396,12 +382,18 @@ impl Trawler {
         reply.set_result(result);
         Trawler::reply(sock, client, &reply)
     }
-    fn fulfill_request(&mut self, request: TRequest) -> Result<(),TrawlerError> {
+    fn fulfill_request(&mut self) -> Result<(),TrawlerError> {
+      let sessions = &mut self.sessions;
+      let base_url = self.base_url;
+      let http_client = &mut self.http_client;
+      let verbose = self.verbose;
+      let sock = &mut self.sock;
+      self.throttle.span_request(|request| { 
         let mut reply = trawler::Reply::new();
         reply.set_reply_type(trawler::Reply_ReplyType::Response);
         reply.set_req_id(request.id);
-        let user_agent : Option<UserAgent>;
-        match self.sessions.get_mut(&request.client) {
+        let user_agent: Option<UserAgent>;
+        match sessions.get_mut(&request.client) {
             Some(session) => {
                 user_agent = Some(UserAgent(session.user_agent.to_string()));
                 session.req_count -= 1;
@@ -413,16 +405,16 @@ impl Trawler {
             let mut url = String::new();
             let rb = match request.method {
                 Method::GET => {
-                    url = url + &self.base_url + &request.path + "?" + &request.query;
-                    self.http_client.get(&url)
+                    url = url + base_url + &request.path + "?" + &request.query;
+                    http_client.get(&url)
                 },
                 Method::HEAD => {
-                    url = url + &self.base_url + &request.path + "?" + &request.query;
-                    self.http_client.head(&url)
+                    url = url + base_url + &request.path + "?" + &request.query;
+                    http_client.head(&url)
                 },
                 Method::POST => {
-                    url = url + &self.base_url + &request.path;
-                    self.http_client.post(&url).body(&request.query)
+                    url = url + base_url + &request.path;
+                    http_client.post(&url).body(&request.query)
                 },
                 _ => panic!("Unsupported method invoked, somehow!?"),
             };
@@ -439,16 +431,16 @@ impl Trawler {
                         res = Err(TrawlerError::from(HyperIoError(err)));
                         std::thread::sleep_ms(128u32 << i);
                     } else {
-                        try!(Trawler::fail(&mut self.sock, &request.client, &mut reply));
+                        try!(Trawler::fail(sock, &request.client, &mut reply));
                         return Err(TrawlerError::from(err));
                     }
                 },
                 Err(err) => {
-                    try!(Trawler::fail(&mut self.sock, &request.client, &mut reply));
+                    try!(Trawler::fail(sock, &request.client, &mut reply));
                     return Err(TrawlerError::from(err));
                 },
                 Ok(mut response) => {
-                    if self.verbose {
+                    if verbose {
                         println!("{} {:?} -> {:?}", now().rfc3339(), request, response);
                     }
                     reply.set_result(response.status.to_u16() as i32);
@@ -456,7 +448,7 @@ impl Trawler {
                     if request.headers {
                         for hv in response.headers.iter() {
                             reply.set_headers(hv.to_string().into_bytes());
-                            try!(Trawler::reply(&mut self.sock, &request.client, &reply));
+                            try!(Trawler::reply(sock, &request.client, &reply));
                         }
                         reply.clear_headers();
                     }
@@ -465,23 +457,24 @@ impl Trawler {
                         let len = match response.read(&mut buffer[..]) {
                             Ok(i) => i,
                             Err(_) => {
-                                return Ok(try!(Trawler::fail(&mut self.sock, &request.client, &mut reply)));
+                                return Ok(try!(Trawler::fail(sock, &request.client, &mut reply)));
                             }
                         };
                         if len == 0 {
                             break;
                         }
                         reply.set_response(buffer[..len].to_vec());
-                        try!(Trawler::reply(&mut self.sock, &request.client, &reply));
+                        try!(Trawler::reply(sock, &request.client, &reply));
                     }
                     reply.clear_response();
                     reply.set_continued(false);
-                    return Ok(try!(Trawler::reply(&mut self.sock, &request.client, &reply)));
+                    return Ok(try!(Trawler::reply(sock, &request.client, &reply)));
                 },
             }
         }
-        try!(Trawler::fail(&mut self.sock, &request.client, &mut reply));
+        try!(Trawler::fail(sock, &request.client, &mut reply));
         return res;
+      })
     }
     fn fail(sock: &mut zmq::Socket, client: &[u8], reply: &mut trawler::Reply) -> Result<(), TrawlerError> {
         reply.set_result(0i32);
@@ -523,30 +516,5 @@ impl TSession {
     }
     fn update_last_activity(&mut self){
         self.last_activity = precise_time_s();
-    }
-}
-
-impl TRequest {
-    fn new(client: &[u8], preq: &trawler::Request) -> TRequest {
-        TRequest {
-            client: client.to_vec(),
-            id: preq.get_id(),
-            method: preq.get_method(),
-            path: preq.get_path().to_string(),    
-            query: preq.get_query().to_string(),
-            session: if preq.has_session() {
-                Some(TRequest::cookie(preq.get_session()))
-            } else {
-                None
-            },
-            headers: preq.has_headers() && preq.get_headers(),
-        }
-    }
-    fn cookie(session: &str) -> Cookie {
-        let a = session.to_string();
-        let b = a.into_bytes();
-        Cookie::parse_header(&[b]).unwrap_or_else({ |err|
-            panic!("Error while parsing requested cookies (session field): {:?}", err)
-        })
     }
 }
