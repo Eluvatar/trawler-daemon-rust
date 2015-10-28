@@ -1,14 +1,14 @@
-trawler-daemon-c
-================
+trawler-daemon-rust
+===================
 
 Daemon to throttle requests as part of trawler protocol
 
 ### Compilation
 
-The daemon depends on zmq, curl, and rust-protobuf. I.E:
+The daemon depends on zmq and rust-protobuf. 
 
 ```sh
-$ sudo dnf install zeromq3 libcurl libcurl-devel
+$ sudo dnf install zeromq3 zeromq3-devel
 ```
 
 The daemon is compiled using cargo.
