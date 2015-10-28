@@ -90,32 +90,33 @@ impl Throttle {
             subthrottles: subthrottles,
         }
     }
+    fn record_end( last_ends: &mut VecDeque<PreciseTime>, limit: usize ) {
+        let end = PreciseTime::now();
+        if last_ends.len() == limit {
+            last_ends.pop_back();
+        }
+        last_ends.push_front( end );
+    }
     pub fn span_request<F,T>(&mut self, mut inner: F ) -> T 
         where F: FnMut(TRequest) -> T {
         if self.requests.is_empty() {
-            if self.subthrottles.is_empty() {
+            if self.is_empty() {
                 panic!("span_request called when no requests available to span!");
             }
             loop {
                 let subthrottle_tm = self.subthrottle_timeout();
                 if subthrottle_tm > Duration::zero() {
                     sleep(subthrottle_tm);
-                }
-                if subthrottle_tm <= Duration::zero() {
+                } else {
                     break;
                 }
             }
         }
         self.last_start = PreciseTime::now();
         for subthrottle in self.subthrottles.iter_mut() {
-            if subthrottle.timeout() <= Duration::zero()
-            {
+            if subthrottle.timeout() <= Duration::zero() {
                 let res = subthrottle.span_request(inner);
-                let end = PreciseTime::now();
-                if self.last_ends.len() == self.limit {
-                    self.last_ends.pop_back();
-                }
-                self.last_ends.push_front( end );
+                Throttle::record_end( &mut self.last_ends, self.limit );
                 return res;
             }
         }
@@ -124,11 +125,7 @@ impl Throttle {
         } else {
             panic!("span_request called when no requests available to span!");
         };
-        let end = PreciseTime::now();
-        if self.last_ends.len() == self.limit {
-            self.last_ends.pop_back();
-        }
-        self.last_ends.push_front( end );
+        Throttle::record_end( &mut self.last_ends, self.limit );
         res
     }
     pub fn is_empty(&self) -> bool {
