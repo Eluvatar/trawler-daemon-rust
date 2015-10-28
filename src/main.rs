@@ -95,6 +95,11 @@ fn client_hex(client: &[u8]) -> String {
     client.iter().map(|byte| format!("{:02x}", byte)).fold(String::new(), |a, b| a+&*b)
 }
 
+fn now_ts() -> String {
+    let _now = now();
+    format!("{}.{:03}", strftime("%Y-%m-%d %T",&_now).unwrap(), _now.tm_nsec/1_000_000)
+}
+
 impl fmt::Debug for TRequest {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_struct("TRequest")
@@ -102,6 +107,7 @@ impl fmt::Debug for TRequest {
             .field("id", &self.id)
             .field("method", &self.method)
             .field("path", &self.path)
+            .field("query", &self.query)
             .field("session", &self.session)
             .field("headers", &self.headers)
             .finish()
@@ -218,7 +224,7 @@ impl Trawler {
         };
         if self.verbose {
             println!("{} polling with timeout of {} ...",
-                     time::now().rfc3339(), to_sleep);
+                     now_ts(), to_sleep);
         }
         zmq::poll(&mut poll_items, to_sleep)
     }
@@ -243,14 +249,14 @@ impl Trawler {
                     Ok(1) => {
                         self.receive().unwrap_or_else( |err|
                             println!("{} Error while listening and waiting to make request: {:?}",
-                                     time::now().rfc3339(), err)
+                                     now_ts(), err)
                         );
                     },
                     Ok(0) => {
                         assert!(! self.throttle.is_empty());
                         self.fulfill_request().unwrap_or_else( |err|
                             println!("{} Error fulfilling request: {:?}",
-                                     time::now().rfc3339(), err)
+                                     now_ts(), err)
                         );
                     },
                     Ok(_) => {
@@ -259,7 +265,7 @@ impl Trawler {
                     }
                 }
                 if self.verbose {
-                    println!("{} throttle: {:?}", time::now().rfc3339(), self.throttle);
+                    println!("{} throttle: {:?}", now_ts(), self.throttle);
                 }
             }
             self.reap();
@@ -278,10 +284,10 @@ impl Trawler {
             self.sessions.remove(client);
             Trawler::logout(&mut self.sock, client, LOGOUT__TIMEOUT).unwrap_or_else( |err| {
                 println!("{} Error while timing out {}: {:?}",
-                         time::now().rfc3339(), client_hex(client), err);
+                         now_ts(), client_hex(client), err);
             });
             if self.verbose {
-                println!("{} Timed out {}", time::now().rfc3339(), client_hex(client));
+                println!("{} Timed out {}", now_ts(), client_hex(client));
             }
         }
     }
@@ -308,14 +314,14 @@ impl Trawler {
                     Ok(login) => {
                         assert!(login.has_user_agent());
                         if self.verbose {
-                            println!("{} {:?} sent {:?}", now().rfc3339(), client_hex(client), login);
+                            println!("{} {:?} sent {:?}", now_ts(), client_hex(client), login);
                         }
                         vacant.insert(TSession::new(&login));
                         Ok(())
                     },
                     Err(_) => {
                         println!("{} Sent logout to {}, as they were not logged in",
-                                 now().rfc3339(), client_hex(client));
+                                 now_ts(), client_hex(client));
                         Trawler::logout(&mut self.sock, client, LOGOUT__LOGIN_SYNTAX)
                     },
                 }
@@ -324,7 +330,7 @@ impl Trawler {
         match Trawler::make_request(content) {
             Ok(request) => {
                 if self.verbose {
-                    println!("{} {:?} sent {:?}", now().rfc3339(), client_hex(client), request);
+                    println!("{} {:?} sent {:?}", now_ts(), client_hex(client), request);
                 }
                 self.request(client, &request)
             },
@@ -428,7 +434,7 @@ impl Trawler {
                 Err(HyperIoError(err)) => {
                     if err.kind() == ConnectionAborted
                         || err.kind() == ConnectionReset {
-                        println!("{} io error: {:?}", now().rfc3339(), err);
+                        println!("{} io error: {:?}", now_ts(), err);
                         res = Err(TrawlerError::from(HyperIoError(err)));
                         std::thread::sleep_ms(128u32 << i);
                     } else {
@@ -442,7 +448,7 @@ impl Trawler {
                 },
                 Ok(mut response) => {
                     if verbose {
-                        println!("{} {:?} -> {:?}", now().rfc3339(), request, response);
+                        println!("{} {:?} -> {:?}", now_ts(), request, response);
                     }
                     reply.set_result(response.status.to_u16() as i32);
                     reply.set_continued(true);
