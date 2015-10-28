@@ -485,6 +485,7 @@ impl Trawler {
     }
     fn fail(sock: &mut zmq::Socket, client: &[u8], reply: &mut trawler::Reply) -> Result<(), TrawlerError> {
         reply.set_result(0i32);
+        reply.clear_response();
         reply.set_continued(false);
         Trawler::reply(sock, client, reply)
     }
