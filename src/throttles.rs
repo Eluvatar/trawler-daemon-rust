@@ -62,7 +62,7 @@ impl Throttle {
     pub fn nssite() -> Throttle {
         Throttle::new(Regex::new(r"^.*$").unwrap(),
             Duration::seconds(30),
-            60,
+            55,
             vec![Throttle::nsapi(),Throttle::nsnonapi()])
     }
     fn nsnonapi() -> Throttle {
@@ -73,7 +73,7 @@ impl Throttle {
     }
     fn nsapi() -> Throttle {
         Throttle::new(Regex::new(r"^/?cgi-bin/api\.cgi").unwrap(),
-            Duration::seconds(30),
+            Duration::seconds(31),
             50,
             vec![])
     }
