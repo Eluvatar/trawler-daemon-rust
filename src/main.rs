@@ -66,6 +66,8 @@ use std::clone::Clone;
 use std::io::Read;
 use std::io::ErrorKind::{ConnectionAborted,ConnectionReset};
 use std::fmt;
+use std::str::from_utf8;
+use std::str::Utf8Error;
 
 // constants
 const ACK: i32= 200;
@@ -73,8 +75,9 @@ const LOGOUT__LOGIN_SYNTAX: i32 = 400;
 const LOGOUT__TIMEOUT: i32 = 408;
 const LOGOUT__SHUTDOWN: i32 = 503;
 #[allow(dead_code)]
-const NACK__GENERIC: i32 = 500;
-const NACK__UNSUPPORTED_METHOD: i32 = 501;
+const NACK__GENERIC: i32 = 1500;
+const NACK__UNSUPPORTED_METHOD: i32 = 1501;
+const NACK__CLICK_TOO_RECENT: i32 = 1429;
 
 const DEBUG_BASE_URL: &'static str = "http://localhost:6260/";
 const HTTP_BASE_URL: &'static str = "http://www.nationstates.net/";
@@ -98,6 +101,13 @@ fn client_hex(client: &[u8]) -> String {
 fn now_ts() -> String {
     let _now = now();
     format!("{}.{:03}", strftime("%Y-%m-%d %T",&_now).unwrap(), _now.tm_nsec/1_000_000)
+}
+
+fn timespec(ts: &trawler::Timestamp) -> Timespec {
+    Timespec{
+        sec: ts.get_seconds(),
+        nsec: ts.get_nanos(),
+    }
 }
 
 impl fmt::Debug for TRequest {
@@ -130,6 +140,7 @@ struct Trawler {
     base_url: &'static str,
     interrupted: bool,
     verbose: bool,
+    last_user_click_complete: Timespec,
 }
 
 error_type! {
@@ -138,7 +149,8 @@ error_type! {
         IoError(std::io::Error) { cause; },
         ProtobufError(protobuf::ProtobufError) { cause; },
         ZmqError(zmq::Error) {},
-        HyperError(hyper::error::Error) { cause; }
+        HyperError(hyper::error::Error) { cause; },
+        Utf8Error(Utf8Error) {} 
     }
 }
 
@@ -202,7 +214,7 @@ impl Trawler {
         let mut context = zmq::Context::new();
         let mut sock = context.socket(zmq::ROUTER).unwrap();
         sock.bind(&("tcp://*:".to_string()+&port.to_string())).unwrap();
-        Trawler{
+        let mut res = Trawler{
             context: context,
             sock: sock,
             throttle: Throttle::nssite(),
@@ -210,8 +222,11 @@ impl Trawler {
             http_client: Client::new(),
             base_url: base_url,
             interrupted: false,
-            verbose: verbose
-        }
+            verbose: verbose,
+            last_user_click_complete: Timespec::new(0,0),
+        };
+        res.http_client.set_redirect_policy(hyper::client::RedirectPolicy::FollowNone);
+        res
     }
     fn poll(&mut self, timeout: Duration) -> Result<i32,zmq::Error> {
         let poll_item = self.sock.as_poll_item(zmq::POLLIN);
@@ -348,21 +363,25 @@ impl Trawler {
         Ok(request)
     }
     fn request(&mut self, client: &[u8], preq: &trawler::Request) -> Result<(),TrawlerError> {
-        match preq.get_method() {
-            Method::GET | Method::HEAD | Method::POST => {
-                self.throttle.queue_request(TRequest::new(client, preq));
-                match self.sessions.entry(client.to_vec()) {
-                    Entry::Occupied(mut occupied) => {
-                        let session = occupied.get_mut();
-                        session.req_count += 1;
-                    },
-                    Entry::Vacant(_) => unreachable!()
-                }
-                self.ack(client, preq.get_id())
-            },
-            _ => {
-                self.nack(client, preq.get_id(), NACK__UNSUPPORTED_METHOD)
-            },
+        if preq.has_user_click() && timespec(preq.get_user_click()) <= self.last_user_click_complete {
+                self.nack(client, preq.get_id(), NACK__CLICK_TOO_RECENT)
+        } else {
+            match preq.get_method() {
+                Method::GET | Method::HEAD | Method::POST => {
+                    self.throttle.queue_request(TRequest::new(client, preq));
+                    match self.sessions.entry(client.to_vec()) {
+                        Entry::Occupied(mut occupied) => {
+                            let session = occupied.get_mut();
+                            session.req_count += 1;
+                        },
+                        Entry::Vacant(_) => unreachable!()
+                    }
+                    self.ack(client, preq.get_id())
+                },
+                _ => {
+                    self.nack(client, preq.get_id(), NACK__UNSUPPORTED_METHOD)
+                },
+            }
         }
     }
     fn ack(&mut self, client: &[u8], req_id: i32) -> Result<(),TrawlerError> {
@@ -395,6 +414,7 @@ impl Trawler {
       let http_client = &mut self.http_client;
       let verbose = self.verbose;
       let sock = &mut self.sock;
+      let last_user_click_complete = &mut self.last_user_click_complete;
       self.throttle.span_request(|request| { 
         let mut reply = trawler::Reply::new();
         reply.set_reply_type(trawler::Reply_ReplyType::Response);
@@ -403,6 +423,7 @@ impl Trawler {
         match sessions.get_mut(&request.client) {
             Some(session) => {
                 user_agent = Some(UserAgent(session.user_agent.to_string()));
+                session.update_last_activity();
                 session.req_count -= 1;
             },
             None => panic!("must have session to fulfill request"),
@@ -436,7 +457,7 @@ impl Trawler {
                         || err.kind() == ConnectionReset {
                         println!("{} io error: {:?}", now_ts(), err);
                         res = Err(TrawlerError::from(HyperIoError(err)));
-                        std::thread::sleep_ms(128u32 << i);
+                        std::thread::sleep(std::time::Duration::from_millis(128u64 << i));
                     } else {
                         try!(Trawler::fail(sock, &request.client, &mut reply));
                         return Err(TrawlerError::from(err));
@@ -453,9 +474,14 @@ impl Trawler {
                     reply.set_result(response.status.to_u16() as i32);
                     reply.set_continued(true);
                     if request.headers {
+                        // println!("get_raw('set-cookie') -> {:?}", response.headers.get_raw("set-cookie"));
+                        reply.set_headers("\r\n".to_string().into_bytes());
+                        try!(Trawler::reply(sock, &request.client, &reply));
                         for hv in response.headers.iter() {
-                            reply.set_headers(hv.to_string().into_bytes());
-                            try!(Trawler::reply(sock, &request.client, &reply));
+                            for part in response.headers.get_raw(hv.name()).unwrap().iter() {
+                                reply.set_headers((hv.name().to_string()+": "+try!(from_utf8(&(*part)[..]))+"\r\n").into_bytes());
+                                try!(Trawler::reply(sock, &request.client, &reply));
+                            }
                         }
                         reply.clear_headers();
                     }
@@ -473,8 +499,11 @@ impl Trawler {
                         reply.set_response(buffer[..len].to_vec());
                         try!(Trawler::reply(sock, &request.client, &reply));
                     }
-                    reply.clear_response();
+                    reply.set_response(vec![]);
                     reply.set_continued(false);
+                    if request.unthrottled {
+                        *last_user_click_complete = get_time();
+                    }
                     return Ok(try!(Trawler::reply(sock, &request.client, &reply)));
                 },
             }
@@ -486,6 +515,7 @@ impl Trawler {
     fn fail(sock: &mut zmq::Socket, client: &[u8], reply: &mut trawler::Reply) -> Result<(), TrawlerError> {
         reply.set_result(0i32);
         reply.clear_response();
+        reply.clear_headers();
         reply.set_continued(false);
         Trawler::reply(sock, client, reply)
     }

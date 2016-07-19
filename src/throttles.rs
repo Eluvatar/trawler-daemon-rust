@@ -11,10 +11,14 @@ use std::fmt;
 
 use std::cmp::{max};
 
-use std::thread::sleep_ms;
+use std::time::Duration as sDuration;
+use std::thread::sleep as tsleep;
 
 fn sleep(to_sleep: Duration) {
-    sleep_ms(to_sleep.num_milliseconds() as u32)
+    tsleep(sDuration::new(
+        to_sleep.num_seconds() as u64,
+        (to_sleep.num_nanoseconds().expect("sleep duration too large") - to_sleep.num_seconds() * 1_000_000_000) as u32
+    ))
 }
 
 pub struct TRequest {
@@ -25,6 +29,7 @@ pub struct TRequest {
     pub query: String,
     pub session: Option<Cookie>,
     pub headers: bool,
+    pub unthrottled: bool,
 }
 
 pub struct Throttle {
@@ -36,6 +41,7 @@ pub struct Throttle {
     last_start: PreciseTime,
     last_ends: VecDeque<PreciseTime>,
     subthrottles: Vec<Throttle>,
+    unthrottled: LinkedList<TRequest>,
 }
 
 fn time_since(ts: &PreciseTime) -> String {
@@ -88,6 +94,7 @@ impl Throttle {
             last_start: PreciseTime::now(),
             last_ends: VecDeque::with_capacity(limit),
             subthrottles: subthrottles,
+            unthrottled: LinkedList::new(),
         }
     }
     fn record_end( last_ends: &mut VecDeque<PreciseTime>, limit: usize ) {
@@ -99,16 +106,21 @@ impl Throttle {
     }
     pub fn span_request<F,T>(&mut self, mut inner: F ) -> T 
         where F: FnMut(TRequest) -> T {
-        if self.requests.is_empty() {
-            if self.is_empty() {
-                panic!("span_request called when no requests available to span!");
-            }
-            loop {
-                let subthrottle_tm = self.subthrottle_timeout();
-                if subthrottle_tm > Duration::zero() {
-                    sleep(subthrottle_tm);
-                } else {
-                    break;
+        match self.unthrottled.pop_front() {
+            Some(request) => return inner(request),
+            None => {
+                if self.requests.is_empty() {
+                    if self.is_empty() {
+                        panic!("span_request called when no requests available to span!");
+                    }
+                    loop {
+                        let subthrottle_tm = self.subthrottle_timeout();
+                        if subthrottle_tm > Duration::zero() {
+                            sleep(subthrottle_tm);
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -180,12 +192,13 @@ impl TRequest {
             method: preq.get_method(),
             path: preq.get_path().to_string(),    
             query: preq.get_query().to_string(),
-            session: if preq.has_session() {
+            session: if preq.has_session() && preq.get_session().len() > 0 {
                 Some(TRequest::cookie(preq.get_session()))
             } else {
                 None
             },
             headers: preq.has_headers() && preq.get_headers(),
+            unthrottled: preq.has_user_click(),
         }
     }
     fn cookie(session: &str) -> Cookie {
