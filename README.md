@@ -14,7 +14,7 @@ $ sudo dnf install zeromq3 zeromq3-devel
 The daemon is compiled using cargo.
 
 ```sh
-$ cargo build daemon
+$ cargo build
 ```
 
 ### Running
