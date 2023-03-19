@@ -1,6 +1,8 @@
 trawler-daemon-rust
 ===================
 
+WARNING: Has not compiled in some time, needs repair work! Probably should strip out zmq and update the clients to match!
+
 Daemon to throttle requests as part of trawler protocol
 
 ### Compilation
